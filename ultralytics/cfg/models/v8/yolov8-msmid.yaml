@@ -1,0 +1,84 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# YOLOv8 Multispectral Middle-Fusion (dual backbone) object detection model with P3/8 - P5/32 outputs
+#
+# Input: multispectral TIFF with band order
+#   3ch: (G, R, NIR) or (G, R, RE)      -> stream A = (G, R), stream B = NIR or RE
+#   4ch: (G, R, NIR, RE)                 -> stream A = (G, R), stream B = (NIR, RE)
+# The number of channels is taken from `channels:` in the dataset YAML (MSSplit adapts automatically).
+#
+# Architecture:
+#   input ─┬─ MSSplit(A: G,R)  ── YOLOv8 backbone A ── P3a, P4a, P5a ─┐
+#          └─ MSSplit(B: rest) ── YOLOv8 backbone B ── P3b, P4b, P5b ─┤
+#                    MSFusion = Concat + 1x1 Conv at P3 / P4 / P5  ◄──┘
+#                                  └── YOLOv8 PAN-FPN neck + Detect head
+#
+# Usage:
+#   model = YOLO("yolov8m-msmid.yaml")   # from scratch (scale n/s/m/l/x selected by file name)
+#   model = YOLO("yolov8m-msmid.pt")     # COCO-pretrained YOLOv8m weights transferred into both streams
+
+# Parameters
+nc: 80 # number of classes
+scales: # model compound scaling constants, i.e. 'model=yolov8n-msmid.yaml' will call yolov8-msmid.yaml with scale 'n'
+  # [depth, width, max_channels]
+  n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+
+# Dual-stream YOLOv8 backbone
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, nn.Identity, []] # 0 input passthrough (shared by both streams)
+
+  # ---- Stream A: visible (G, R) ----
+  - [0, 1, MSSplit, [0]] # 1 select (G, R)
+  - [-1, 1, Conv, [64, 3, 2]] # 2-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 3-P2/4
+  - [-1, 3, C2f, [128, True]] # 4
+  - [-1, 1, Conv, [256, 3, 2]] # 5-P3/8
+  - [-1, 6, C2f, [256, True]] # 6  P3a
+  - [-1, 1, Conv, [512, 3, 2]] # 7-P4/16
+  - [-1, 6, C2f, [512, True]] # 8  P4a
+  - [-1, 1, Conv, [1024, 3, 2]] # 9-P5/32
+  - [-1, 3, C2f, [1024, True]] # 10
+  - [-1, 1, SPPF, [1024, 5, 3, False, True]] # 11 P5a (cv1_act=True: original YOLOv8 SPPF)
+
+  # ---- Stream B: remaining bands (NIR / RE / NIR+RE) ----
+  - [0, 1, MSSplit, [1]] # 12 select (NIR, RE, ...)
+  - [-1, 1, Conv, [64, 3, 2]] # 13-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 14-P2/4
+  - [-1, 3, C2f, [128, True]] # 15
+  - [-1, 1, Conv, [256, 3, 2]] # 16-P3/8
+  - [-1, 6, C2f, [256, True]] # 17 P3b
+  - [-1, 1, Conv, [512, 3, 2]] # 18-P4/16
+  - [-1, 6, C2f, [512, True]] # 19 P4b
+  - [-1, 1, Conv, [1024, 3, 2]] # 20-P5/32
+  - [-1, 3, C2f, [1024, True]] # 21
+  - [-1, 1, SPPF, [1024, 5, 3, False, True]] # 22 P5b
+
+  # ---- Middle fusion: Concat + 1x1 Conv ----
+  - [[6, 17], 1, MSFusion, []] # 23 P3 fused
+  - [[8, 19], 1, MSFusion, []] # 24 P4 fused
+  - [[11, 22], 1, MSFusion, []] # 25 P5 fused
+
+# YOLOv8 head (identical to yolov8.yaml, indices shifted by +16)
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 26
+  - [[-1, 24], 1, Concat, [1]] # 27 cat fused P4
+  - [-1, 3, C2f, [512]] # 28
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 29
+  - [[-1, 23], 1, Concat, [1]] # 30 cat fused P3
+  - [-1, 3, C2f, [256]] # 31 (P3/8-small)
+
+  - [-1, 1, Conv, [256, 3, 2]] # 32
+  - [[-1, 28], 1, Concat, [1]] # 33 cat head P4
+  - [-1, 3, C2f, [512]] # 34 (P4/16-medium)
+
+  - [-1, 1, Conv, [512, 3, 2]] # 35
+  - [[-1, 25], 1, Concat, [1]] # 36 cat fused P5
+  - [-1, 3, C2f, [1024]] # 37 (P5/32-large)
+
+  - [[31, 34, 37], 1, Detect, [nc]] # 38 Detect(P3, P4, P5)

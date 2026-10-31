@@ -58,6 +58,8 @@ from ultralytics.nn.modules import (
     ImagePoolingAttn,
     Index,
     LRPCHead,
+    MSFusion,
+    MSSplit,
     Pose,
     Pose26,
     RepC3,
@@ -334,8 +336,40 @@ class BaseModel(torch.nn.Module):
                 c1, c2 = min(c1, cc1), min(c2, cc2)
                 state_dict[first_conv][:c1, :c2] = csd[first_conv][:c1, :c2]
                 len_updated_csd += 1
+        len_updated_csd += self._adapt_ms_stems(csd, updated_csd, state_dict)
         if verbose:
             LOGGER.info(f"Transferred {len_updated_csd}/{len(self.model.state_dict())} items from pretrained weights")
+
+    def _adapt_ms_stems(self, csd, updated_csd, state_dict):
+        """Transfer stem conv weights of multispectral (MSSplit) streams whose input channel count differs.
+
+        E.g. a 4ch (G,R,NIR,RE) checkpoint has a 2-channel stem in stream B, while a 3ch (G,R,NIR) model needs a
+        1-channel stem. Shared input channels are copied; missing channels are filled with the mean of the source
+        channels, and the result is rescaled so the expected activation magnitude is preserved.
+
+        Returns:
+            (int): Number of adapted tensors.
+        """
+        n = 0
+        for i, m in enumerate(self.model):
+            if not isinstance(m, MSSplit) or i + 1 >= len(self.model):
+                continue
+            k = f"model.{i + 1}.conv.weight"
+            if k in updated_csd or k not in state_dict or k not in csd:
+                continue
+            w_dst, w_src = state_dict[k], csd[k]
+            if w_dst.shape[0] != w_src.shape[0] or w_dst.shape[2:] != w_src.shape[2:]:
+                continue
+            c_dst, c_src = w_dst.shape[1], w_src.shape[1]
+            c = min(c_dst, c_src)
+            w = torch.empty_like(w_dst)
+            w[:, :c] = w_src[:, :c]
+            if c_dst > c_src:
+                w[:, c_src:] = w_src.mean(1, keepdim=True)
+            w *= w_src.sum(1, keepdim=True).abs().mean() / w.sum(1, keepdim=True).abs().mean().clamp(min=1e-12)
+            w_dst.copy_(w)
+            n += 1
+        return n
 
     def _remap_cls_by_names(self, csd: dict[str, torch.Tensor], src_model: torch.nn.Module, verbose: bool = True):
         """Remap pretrained classification head rows to current class order by name.
@@ -2102,6 +2136,14 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m is MSSplit:  # multispectral stream selector: args [stream, (n_vis), (flip3)]
+            c1 = ch[f]
+            args = [c1, *args]
+            c2 = MSSplit(*args).c2
+        elif m is MSFusion:  # multispectral middle fusion: Concat + 1x1 Conv, out channels = first input
+            c1 = sum(ch[x] for x in f)
+            c2 = ch[f[0]]
+            args = [c1, c2, *args]
         elif m in frozenset(
             {
                 Detect,

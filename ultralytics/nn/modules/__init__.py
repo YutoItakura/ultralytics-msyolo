@@ -95,6 +95,7 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
+from .multispectral import MSFusion, MSSplit
 from .transformer import (
     AIFI,
     MLP,
@@ -167,6 +168,8 @@ __all__ = (
     "LightConv",
     "MLPBlock",
     "MSDeformAttn",
+    "MSFusion",
+    "MSSplit",
     "MaxSigmoidAttnBlock",
     "Pose",
     "Pose26",

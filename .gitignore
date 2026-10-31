@@ -155,8 +155,10 @@ wandb/
 
 # Neural Network weights -----------------------------------------------------------------------------------------------
 weights/
+!weights/
 *.weights
 *.pt
+!weights/*-msmid.pt
 *.ts
 *.pb
 *.onnx
