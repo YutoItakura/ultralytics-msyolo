@@ -32,7 +32,7 @@ from ultralytics.utils import LOGGER
 
 MSMID_REPO = "YutoItakura/ultralytics-msyolo"  # GitHub repo hosting pre-converted weights in weights/
 MSMID_BRANCH = "main"
-MSMID_NAME_RE = re.compile(r"yolov8([nslmx])-msmid\.pt")
+MSMID_NAME_RE = re.compile(r"yolov8([nslmx])-(msmid|mscmg)\.pt")
 
 N_BACKBONE = 10  # YOLOv8 backbone layers 0-9
 OFFSET_A, OFFSET_B, OFFSET_HEAD = 2, 13, 16  # layer index offsets in yolov8-msmid.yaml
@@ -65,28 +65,30 @@ def convert_yolov8_to_msmid(
     dst: str | Path | None = None,
     ch: int = 4,
     cfg: str | None = None,
+    variant: str = "msmid",
     verbose: bool = True,
 ) -> Path:
     """Convert an official YOLOv8 detection checkpoint into a dual-stream middle-fusion checkpoint.
 
     Args:
         src (str | Path): Source YOLOv8 checkpoint (downloaded automatically if it's an official name).
-        dst (str | Path, optional): Output path. Defaults to ``yolov8{scale}-msmid.pt`` next to the source.
+        dst (str | Path, optional): Output path. Defaults to ``yolov8{scale}-{variant}.pt`` next to the source.
         ch (int): Number of input channels of the multispectral TIFFs (3 or 4).
-        cfg (str, optional): Model YAML. Defaults to ``yolov8{scale}-msmid.yaml``.
+        cfg (str, optional): Model YAML. Defaults to ``yolov8{scale}-{variant}.yaml``.
+        variant (str): Model variant name (``"msmid"`` or ``"mscmg"``).
         verbose (bool): Print transfer summary.
 
     Returns:
         (Path): Path to the saved checkpoint.
     """
     from ultralytics import __version__
-    from ultralytics.nn.modules import MSFusion, MSSplit
+    from ultralytics.nn.modules import CMGFusion, MSFusion, MSSplit
     from ultralytics.nn.tasks import DetectionModel, load_checkpoint
 
     src_model, ckpt_args = load_checkpoint(src, fuse=False)
     scale = src_model.yaml.get("scale") or re.search(r"yolov8([nslmx])", Path(str(src)).stem).group(1)
-    cfg = cfg or f"yolov8{scale}-msmid.yaml"
-    dst = Path(dst) if dst else Path(str(src)).with_name(f"yolov8{scale}-msmid.pt")
+    cfg = cfg or f"yolov8{scale}-{variant}.yaml"
+    dst = Path(dst) if dst else Path(str(src)).with_name(f"yolov8{scale}-{variant}.pt")
 
     model = DetectionModel(cfg, ch=ch, nc=src_model.yaml["nc"], verbose=False)
     model.names = deepcopy(src_model.names)
@@ -114,14 +116,15 @@ def convert_yolov8_to_msmid(
             sd[k2].copy_(v2)
             loaded.add(k2)
 
+    fusion_types = (MSFusion, CMGFusion)
     fusion_keys = {
-        f"model.{m.i}.{n}" for m in model.model if isinstance(m, MSFusion) for n, _ in m.named_parameters()
-    } | {f"model.{m.i}.{n}" for m in model.model if isinstance(m, MSFusion) for n, _ in m.named_buffers()}
+        f"model.{m.i}.{n}" for m in model.model if isinstance(m, fusion_types) for n, _ in m.named_parameters()
+    } | {f"model.{m.i}.{n}" for m in model.model if isinstance(m, fusion_types) for n, _ in m.named_buffers()}
     missing = [k for k in sd if k not in loaded and k not in fusion_keys]
     if verbose:
         LOGGER.info(
-            f"MSMid conversion {src} -> {dst}: transferred {len(loaded)}/{len(sd)} tensors "
-            f"({len(fusion_keys)} fusion tensors identity-initialized), ch={ch} (A={n_a}, B={n_b})"
+            f"MS-{variant} conversion {src} -> {dst}: transferred {len(loaded)}/{len(sd)} tensors "
+            f"({len(fusion_keys)} fusion tensors initialized), ch={ch} (A={n_a}, B={n_b})"
         )
     if missing or skipped:
         raise RuntimeError(f"Incomplete weight transfer. missing={missing[:10]} skipped={skipped[:10]}")
@@ -149,11 +152,22 @@ def convert_yolov8_to_msmid(
     return dst
 
 
+def convert_yolov8_to_mscmg(
+    src: str | Path = "yolov8m.pt",
+    dst: str | Path | None = None,
+    ch: int = 4,
+    cfg: str | None = None,
+    verbose: bool = True,
+) -> Path:
+    """Convert an official YOLOv8 checkpoint into a dual-stream CMGFusion checkpoint (``yolov8{scale}-mscmg.pt``)."""
+    return convert_yolov8_to_msmid(src=src, dst=dst, ch=ch, cfg=cfg, variant="mscmg", verbose=verbose)
+
+
 def get_msmid_weights(name: str, file: str | Path) -> str:
-    """Resolve ``yolov8{scale}-msmid.pt``: download from the GitHub repo, or build it from the official YOLOv8 weights.
+    """Resolve ``yolov8{scale}-{msmid|mscmg}.pt``: download from GitHub, or build from official YOLOv8 weights.
 
     Args:
-        name (str): File name, e.g. ``yolov8m-msmid.pt``.
+        name (str): File name, e.g. ``yolov8m-msmid.pt`` or ``yolov8m-mscmg.pt``.
         file (str | Path): Requested local path.
 
     Returns:
@@ -169,6 +183,7 @@ def get_msmid_weights(name: str, file: str | Path) -> str:
             return str(file)
     except Exception as e:
         LOGGER.info(f"Pre-converted {name} not available ({e}); converting from official YOLOv8 weights instead.")
-    scale = MSMID_NAME_RE.fullmatch(name).group(1)
+    m = MSMID_NAME_RE.fullmatch(name)
+    scale, variant = m.group(1), m.group(2)
     src = attempt_download_asset(f"yolov8{scale}.pt")
-    return str(convert_yolov8_to_msmid(src, file))
+    return str(convert_yolov8_to_msmid(src, file, variant=variant))

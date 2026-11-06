@@ -95,7 +95,7 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
-from .multispectral import MSFusion, MSSplit
+from .multispectral import CMGFusion, MSFusion, MSSplit
 from .transformer import (
     AIFI,
     MLP,
@@ -143,6 +143,7 @@ __all__ = (
     "C3x",
     "CBFuse",
     "CBLinear",
+    "CMGFusion",
     "ChannelAttention",
     "Classify",
     "Concat",

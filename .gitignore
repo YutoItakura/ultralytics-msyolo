@@ -159,6 +159,7 @@ weights/
 *.weights
 *.pt
 !weights/*-msmid.pt
+!weights/*-mscmg.pt
 *.ts
 *.pb
 *.onnx

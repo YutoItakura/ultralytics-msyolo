@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-__all__ = ("MSFusion", "MSSplit")
+__all__ = ("CMGFusion", "MSFusion", "MSSplit")
 
 
 class MSSplit(nn.Module):
@@ -126,3 +127,111 @@ class MSFusion(nn.Module):
     def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
         """Concatenate the input feature maps and apply the 1x1 fusion convolution."""
         return self.act(self.bn(self.conv(torch.cat(x, 1))))
+
+
+class CMGFusion(nn.Module):
+    """Cross-Modal Gated & Differential Fusion (CMGFusion) for multispectral object detection.
+
+    Designed for agricultural multispectral disease detection (small, dense lesions with subtle inter-band parallax):
+    1. **3x3 Depthwise Residual Alignment**: absorbs local sub-pixel/few-pixel registration residuals between the
+       visible stream (G, R) and the NIR/RE stream.
+    2. **Spectral Differential & Multiplicative Branch**: explicitly computes ``align_b - align_a`` (spectral contrast
+       analogous to NDVI/GNDVI/NDRE) and ``SiLU(align_a) * SiLU(align_b)`` (structural co-activation), then refines
+       them with a lightweight depthwise-separable bottleneck.
+    3. **Channel + Spatial Cross-Modal Gate**: dynamically weights visible vs. NIR/RE features per channel (SE gate)
+       and per spatial location (7x7 spatial contrast gate).
+
+    All residual/gating output projections are zero-initialized so that at step 0 the module computes the exact stream
+    average ``0.5 * f_a + 0.5 * f_b`` (preserving transferred YOLOv8 pretrained head compatibility) while every sub-branch
+    receives non-zero gradients from the very first backward pass.
+
+    Examples:
+        >>> m = CMGFusion(512, 256)
+        >>> a, b = torch.randn(1, 256, 20, 20), torch.randn(1, 256, 20, 20)
+        >>> torch.allclose(m([a, b]), (a + b) / 2, atol=1e-6)
+        True
+    """
+
+    def __init__(self, c1: int, c2: int, reduction: int = 4, k_align: int = 3, k_spatial: int = 7):
+        """Initialize CMGFusion.
+
+        Args:
+            c1 (int): Total input channels (sum of both streams, expected ``2 * c2``).
+            c2 (int): Output channels (single-stream width).
+            reduction (int): Channel reduction ratio for the channel gate and differential bottleneck.
+            k_align (int): Kernel size for per-stream depthwise spatial alignment.
+            k_spatial (int): Kernel size for the spatial cross-modal gate.
+        """
+        super().__init__()
+        if c1 != 2 * c2:
+            raise ValueError(f"CMGFusion expects two equal-width streams (c1 == 2 * c2), got c1={c1}, c2={c2}")
+        c_mid = max(c2 // reduction, 16)
+
+        # 1) Local spatial alignment (3x3 depthwise residual conv per stream)
+        self.dw_a = nn.Conv2d(c2, c2, k_align, 1, k_align // 2, groups=c2, bias=True)
+        self.dw_b = nn.Conv2d(c2, c2, k_align, 1, k_align // 2, groups=c2, bias=True)
+
+        # 2) Channel gate (SE-style on concatenated global avg + max pooled descriptors)
+        self.channel_gate = nn.Sequential(
+            nn.Conv2d(c1, c_mid, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c_mid, c2, 1, bias=True),
+        )
+
+        # 3) Spatial gate on [mean_a, max_a, mean_b, max_b, mean_diff, max_diff] (6 channels)
+        self.spatial_gate = nn.Conv2d(6, 1, k_spatial, 1, k_spatial // 2, bias=True)
+
+        # 4) Differential & multiplicative interaction branch: input is [align_b - align_a, SiLU(a)*SiLU(b)] (2*c2 ch)
+        self.diff_branch = nn.Sequential(
+            nn.Conv2d(c1, c_mid, 1, bias=False),
+            nn.BatchNorm2d(c_mid),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c_mid, c_mid, 3, 1, 1, groups=c_mid, bias=False),
+            nn.BatchNorm2d(c_mid),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c_mid, c2, 1, bias=True),
+        )
+        self.act = nn.SiLU(inplace=True)
+        self.reset_identity()
+
+    @torch.no_grad()
+    def reset_identity(self):
+        """Zero-initialize residual/gate projections so initial output equals 0.5 * (f_a + f_b) with full grad flow."""
+        for m in (self.dw_a, self.dw_b, self.channel_gate[-1], self.spatial_gate, self.diff_branch[-1]):
+            nn.init.zeros_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+        """Fuse visible stream A and NIR/RE stream B via alignment, dynamic gating, and differential contrast."""
+        f_a, f_b = x[0], x[1]
+
+        # Step 1: Local spatial alignment
+        a = f_a + self.dw_a(f_a)
+        b = f_b + self.dw_b(f_b)
+
+        # Step 2: Spectral difference & multiplicative co-activation
+        diff = b - a
+        inter = F.silu(a) * F.silu(b)
+
+        # Step 3: Dynamic channel + spatial cross-modal gate
+        ab = torch.cat([a, b], dim=1)
+        g_c = self.channel_gate(ab.mean((2, 3), keepdim=True) + ab.amax((2, 3), keepdim=True))
+        s_in = torch.cat(
+            [
+                a.mean(1, keepdim=True),
+                a.amax(1, keepdim=True),
+                b.mean(1, keepdim=True),
+                b.amax(1, keepdim=True),
+                diff.mean(1, keepdim=True),
+                diff.amax(1, keepdim=True),
+            ],
+            dim=1,
+        )
+        g_s = self.spatial_gate(s_in)
+        alpha = torch.sigmoid(g_c + g_s)
+
+        # Step 4: Gated base + differential contrast enhancement
+        base = alpha * a + (1.0 - alpha) * b
+        delta = self.diff_branch(torch.cat([diff, inter], dim=1))
+        return base + delta

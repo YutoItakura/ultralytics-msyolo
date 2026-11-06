@@ -538,7 +538,7 @@ def attempt_download_asset(
         elif repo == GITHUB_ASSETS_REPO and name in GITHUB_ASSETS_NAMES:
             safe_download(url=f"{download_url}/{release}/{name}", file=file, min_bytes=1e5, **kwargs)
 
-        elif re.fullmatch(r"yolov8[nslmx]-msmid\.pt", name):  # multispectral middle-fusion weights
+        elif re.fullmatch(r"yolov8[nslmx]-(msmid|mscmg)\.pt", name):  # multispectral fusion weights
             from ultralytics.utils.multispectral import get_msmid_weights
 
             return get_msmid_weights(name, file)
