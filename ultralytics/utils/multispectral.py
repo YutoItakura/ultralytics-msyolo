@@ -32,7 +32,7 @@ from ultralytics.utils import LOGGER
 
 MSMID_REPO = "YutoItakura/ultralytics-msyolo"  # GitHub repo hosting pre-converted weights in weights/
 MSMID_BRANCH = "main"
-MSMID_NAME_RE = re.compile(r"yolov8([nslmx])-(msmid|mscmg|mscg)\.pt")
+MSMID_NAME_RE = re.compile(r"yolov8([nslmx])-(msmid|mscmg|mscg|msattn)\.pt")
 
 N_BACKBONE = 10  # YOLOv8 backbone layers 0-9
 OFFSET_A, OFFSET_B, OFFSET_HEAD = 2, 13, 16  # layer index offsets in yolov8-msmid.yaml
@@ -82,7 +82,7 @@ def convert_yolov8_to_msmid(
         (Path): Path to the saved checkpoint.
     """
     from ultralytics import __version__
-    from ultralytics.nn.modules import CGFusion, CMGFusion, MSFusion, MSSplit
+    from ultralytics.nn.modules import CGFusion, CMGFusion, MSAttnFusion, MSFusion, MSSplit
     from ultralytics.nn.tasks import DetectionModel, load_checkpoint
 
     src_model, ckpt_args = load_checkpoint(src, fuse=False)
@@ -116,7 +116,7 @@ def convert_yolov8_to_msmid(
             sd[k2].copy_(v2)
             loaded.add(k2)
 
-    fusion_types = (MSFusion, CMGFusion, CGFusion)
+    fusion_types = (MSFusion, CMGFusion, CGFusion, MSAttnFusion)
     fusion_keys = {
         f"model.{m.i}.{n}" for m in model.model if isinstance(m, fusion_types) for n, _ in m.named_parameters()
     } | {f"model.{m.i}.{n}" for m in model.model if isinstance(m, fusion_types) for n, _ in m.named_buffers()}
@@ -172,6 +172,17 @@ def convert_yolov8_to_mscg(
 ) -> Path:
     """Convert an official YOLOv8 checkpoint into a dual-stream CGFusion checkpoint (``yolov8{scale}-mscg.pt``)."""
     return convert_yolov8_to_msmid(src=src, dst=dst, ch=ch, cfg=cfg, variant="mscg", verbose=verbose)
+
+
+def convert_yolov8_to_msattn(
+    src: str | Path = "yolov8m.pt",
+    dst: str | Path | None = None,
+    ch: int = 4,
+    cfg: str | None = None,
+    verbose: bool = True,
+) -> Path:
+    """Convert an official YOLOv8 checkpoint into a dual-stream MSAttnFusion checkpoint (``yolov8{scale}-msattn.pt``)."""
+    return convert_yolov8_to_msmid(src=src, dst=dst, ch=ch, cfg=cfg, variant="msattn", verbose=verbose)
 
 
 def get_msmid_weights(name: str, file: str | Path) -> str:

@@ -95,7 +95,7 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
-from .multispectral import CGFusion, CMGFusion, MSFusion, MSSplit
+from .multispectral import CGFusion, CMGFusion, MSAttnFusion, MSFusion, MSSplit
 from .transformer import (
     AIFI,
     MLP,
@@ -169,6 +169,7 @@ __all__ = (
     "LayerNorm2d",
     "LightConv",
     "MLPBlock",
+    "MSAttnFusion",
     "MSDeformAttn",
     "MSFusion",
     "MSSplit",

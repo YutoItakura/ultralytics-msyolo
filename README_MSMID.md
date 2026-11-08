@@ -1,13 +1,16 @@
-# YOLOv8 マルチスペクトル 融合モデル (`yolov8-msmid` / `yolov8-mscg` / `yolov8-mscmg`)
+# YOLOv8 マルチスペクトル 融合モデル (`yolov8-msattn` / `yolov8-mscg` / `yolov8-mscmg` / `yolov8-msmid`)
 
 [Ultralytics](https://github.com/ultralytics/ultralytics) v8.4.129 のフォークです。マルチスペクトル TIFF 用の
 **デュアルバックボーン融合 YOLOv8** を搭載しています。
 
-1. **`yolov8m-msmid.pt` (`MSFusion`)**: P3 / P4 / P5 で `Concat + 1x1 Conv` によるシンプルなミドル融合を行うベースラインモデル
-2. **`yolov8m-mscg.pt` (`CGFusion`)**: **`MSFusion` に「局所位置ずれ吸収（3x3 DWConv）」と「動的チャネルゲート（Channel Gate）」のみを追加したモデル（推奨）**
-   - **3x3 Depthwise 位置ズレ吸収**: 可視光 `(G, R)` と `NIR / RE` の各ストリームで微小なレジストレーション残差を吸収
-   - **全チャネル動的ゲート + 1x1 Conv**: 結合した全 $2C$ チャネルに対して大域コンテキスト（Avg + Max Pool）から動的チャネル重み $2\sigma(\cdot)$ を乗算した上で、1x1 Conv で全チャネル間を混合（空間ゲートや追加 BatchNorm を省き、少数データでの過学習を防止）
+1. **`yolov8m-msattn.pt` (`MSAttnFusion`)【最新・推奨】**: **ゲート不使用・マルチスケール位置ずれ吸収 ＋ 双方向 Cross-Covariance Attention ＋ 局所背景差分モデル**
+   - **3x3 + 5x5 マルチスケール位置ズレ吸収**: 微小な1pxズレから葉の揺れ（2〜3px）までを各ストリームで吸収
+   - **双方向マルチヘッド Cross-Covariance Attention**: Sigmoid ゲートを使わず、可視ストリームと近赤外ストリーム間で $\text{Softmax}(\tau \hat{Q}_A \hat{K}_B^\top) V_B$ による全チャネル相互相関アテンションを $O(HW)$ で計算
+   - **7x7 局所背景差分（Local Anomaly Contrast）**: `x - AvgPool7x7(x)` により日照・影の影響を取り除き、周囲の健常葉に対する微小病斑のスペクトル異常を強調
+   - **オプティマイザ改善**: 少数データ学習時の勾配蓄積ステップ自動調整＋融合層の学習率 `5×` ブーストを搭載
+2. **`yolov8m-mscg.pt` (`CGFusion`)**: `MSFusion` に 3x3 局所位置ずれ吸収と動的チャネルゲートを追加したモデル
 3. **`yolov8m-mscmg.pt` (`CMGFusion`)**: 位置ズレ吸収＋動的チャネル/空間ゲート＋スペクトル差分ブランチモデル
+4. **`yolov8m-msmid.pt` (`MSFusion`)**: P3 / P4 / P5 で `Concat + 1x1 Conv` によるシンプルなミドル融合を行うベースラインモデル
 
 ```
 input ─┬─ MSSplit(A: G,R)  ── YOLOv8 backbone A ── P3a, P4a, P5a ─┐
@@ -33,12 +36,13 @@ input ─┬─ MSSplit(A: G,R)  ── YOLOv8 backbone A ── P3a, P4a, P5a �
 ```python
 from ultralytics import YOLO
 
-# 局所位置ずれ吸収 + 動的チャネルゲートモデル (推奨)
-model = YOLO("yolov8m-mscg.pt")
+# マルチスケール位置ずれ吸収 + 双方向Cross-Attention + 局所背景差分モデル (推奨)
+model = YOLO("yolov8m-msattn.pt")
 
 # 既存モデル
-# model = YOLO("yolov8m-msmid.pt")
+# model = YOLO("yolov8m-mscg.pt")
 # model = YOLO("yolov8m-mscmg.pt")
+# model = YOLO("yolov8m-msmid.pt")
 
 model.train(data="data.yaml", epochs=100, imgsz=1024, hsv_h=0.0, hsv_s=0.0, hsv_v=0.0)
 ```
