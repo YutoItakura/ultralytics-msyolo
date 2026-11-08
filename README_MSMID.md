@@ -1,13 +1,13 @@
-# YOLOv8 マルチスペクトル 融合モデル (`yolov8-msmid` / `yolov8-mscmg`)
+# YOLOv8 マルチスペクトル 融合モデル (`yolov8-msmid` / `yolov8-mscg` / `yolov8-mscmg`)
 
 [Ultralytics](https://github.com/ultralytics/ultralytics) v8.4.129 のフォークです。マルチスペクトル TIFF 用の
-**2種類のデュアルバックボーン融合 YOLOv8** を搭載しています。
+**デュアルバックボーン融合 YOLOv8** を搭載しています。
 
 1. **`yolov8m-msmid.pt` (`MSFusion`)**: P3 / P4 / P5 で `Concat + 1x1 Conv` によるシンプルなミドル融合を行うベースラインモデル
-2. **`yolov8m-mscmg.pt` (`CMGFusion`)**: 植物病害・微小病斑検出に特化した **Cross-Modal Gated & Differential Fusion** モデル
-   - **3x3 Depthwise 位置ズレ吸収**: 可視光 `(G, R)` と `NIR / RE` 間の微小なレジストレーション残差・葉の揺れを吸収
-   - **スペクトル差分・乗算ブランチ**: `B - A`（NDVI/GNDVI/NDRE に対応する波長間コントラスト）と `SiLU(A) * SiLU(B)`（構造共起）を明示的に抽出
-   - **動的チャネル＋空間クロスゲート**: 照明条件や影・病斑の種類に応じて、チャネルごと（SE Gate）および空間位置ごと（7×7 Spatial Gate）に可視光と近赤外の重み $\alpha$ を動的に制御
+2. **`yolov8m-mscg.pt` (`CGFusion`)**: **`MSFusion` に「局所位置ずれ吸収（3x3 DWConv）」と「動的チャネルゲート（Channel Gate）」のみを追加したモデル（推奨）**
+   - **3x3 Depthwise 位置ズレ吸収**: 可視光 `(G, R)` と `NIR / RE` の各ストリームで微小なレジストレーション残差を吸収
+   - **全チャネル動的ゲート + 1x1 Conv**: 結合した全 $2C$ チャネルに対して大域コンテキスト（Avg + Max Pool）から動的チャネル重み $2\sigma(\cdot)$ を乗算した上で、1x1 Conv で全チャネル間を混合（空間ゲートや追加 BatchNorm を省き、少数データでの過学習を防止）
+3. **`yolov8m-mscmg.pt` (`CMGFusion`)**: 位置ズレ吸収＋動的チャネル/空間ゲート＋スペクトル差分ブランチモデル
 
 ```
 input ─┬─ MSSplit(A: G,R)  ── YOLOv8 backbone A ── P3a, P4a, P5a ─┐
@@ -33,11 +33,12 @@ input ─┬─ MSSplit(A: G,R)  ── YOLOv8 backbone A ── P3a, P4a, P5a �
 ```python
 from ultralytics import YOLO
 
-# 新モデル: Cross-Modal Gated & Differential Fusion (推奨)
-model = YOLO("yolov8m-mscmg.pt")
+# 局所位置ずれ吸収 + 動的チャネルゲートモデル (推奨)
+model = YOLO("yolov8m-mscg.pt")
 
-# 既存モデル: Concat + 1x1 Conv ミドル融合
+# 既存モデル
 # model = YOLO("yolov8m-msmid.pt")
+# model = YOLO("yolov8m-mscmg.pt")
 
 model.train(data="data.yaml", epochs=100, imgsz=1024, hsv_h=0.0, hsv_s=0.0, hsv_v=0.0)
 ```

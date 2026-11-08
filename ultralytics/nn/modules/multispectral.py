@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ("CMGFusion", "MSFusion", "MSSplit")
+__all__ = ("CGFusion", "CMGFusion", "MSFusion", "MSSplit")
 
 
 class MSSplit(nn.Module):
@@ -235,3 +235,79 @@ class CMGFusion(nn.Module):
         base = alpha * a + (1.0 - alpha) * b
         delta = self.diff_branch(torch.cat([diff, inter], dim=1))
         return base + delta
+
+
+class CGFusion(nn.Module):
+    """Channel-Gated & Aligned Middle Fusion (CGFusion) for multispectral object detection.
+
+    Combines ONLY two lightweight mechanisms on top of ``MSFusion`` (Concat + 1x1 Conv):
+    1. **Local Misalignment Absorption (3x3 Depthwise Residual Conv)**: absorbs inter-lens registration residuals
+       for stream A (G, R) and stream B (NIR / RE) independently.
+    2. **Dynamic Channel Gate (SE-style over all 2C concatenated channels)**: dynamically re-weights every channel
+       of both streams based on global average + max pooled context before the 1x1 cross-channel fusion conv.
+
+    Initialized so that at step 0 ``dw_a = 0``, ``dw_b = 0``, ``gate = 1.0``, and ``conv = [0.5*I | 0.5*I]``, making it
+    a strict superset of ``MSFusion`` with zero BatchNorm statistical drift.
+
+    Examples:
+        >>> m = CGFusion(512, 256)
+        >>> a, b = torch.randn(1, 256, 20, 20), torch.randn(1, 256, 20, 20)
+        >>> torch.allclose(m([a, b]), (a + b) / 2, atol=1e-6)
+        True
+    """
+
+    def __init__(self, c1: int, c2: int, reduction: int = 4, k_align: int = 3):
+        """Initialize CGFusion.
+
+        Args:
+            c1 (int): Total input channels (sum of both streams, ``2 * c2``).
+            c2 (int): Output channels.
+            reduction (int): Reduction ratio for the dynamic channel gate MLP.
+            k_align (int): Kernel size for the per-stream depthwise alignment conv.
+        """
+        super().__init__()
+        if c1 != 2 * c2:
+            raise ValueError(f"CGFusion expects two equal-width streams (c1 == 2 * c2), got c1={c1}, c2={c2}")
+        c_mid = max(c1 // reduction, 16)
+
+        # 1) Local misalignment absorption (per-stream 3x3 depthwise residual conv)
+        self.dw_a = nn.Conv2d(c2, c2, k_align, 1, k_align // 2, groups=c2, bias=True)
+        self.dw_b = nn.Conv2d(c2, c2, k_align, 1, k_align // 2, groups=c2, bias=True)
+
+        # 2) Dynamic channel gate across all 2*c2 channels (scaled by 2*sigmoid so 0-init -> 1.0)
+        self.channel_gate = nn.Sequential(
+            nn.Conv2d(c1, c_mid, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c_mid, c1, 1, bias=True),
+        )
+
+        # 3) 1x1 cross-channel fusion convolution (initialized to [0.5*I | 0.5*I], identical to MSFusion)
+        self.conv = nn.Conv2d(c1, c2, 1, 1, 0, bias=True)
+        self.reset_identity()
+
+    @torch.no_grad()
+    def reset_identity(self):
+        """Initialize alignment & gate residuals to identity and 1x1 conv to stream average [0.5*I | 0.5*I]."""
+        for m in (self.dw_a, self.dw_b, self.channel_gate[-1]):
+            nn.init.zeros_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        c2, c1 = self.conv.out_channels, self.conv.in_channels
+        k = c1 // c2
+        w = torch.zeros(c2, c1, 1, 1)
+        eye = torch.eye(c2) / k
+        for s in range(k):
+            w[:, s * c2 : (s + 1) * c2, 0, 0] = eye
+        self.conv.weight.copy_(w)
+        if self.conv.bias is not None:
+            self.conv.bias.zero_()
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+        """Align both streams locally, apply dynamic channel gating, and fuse with 1x1 convolution."""
+        f_a, f_b = x[0], x[1]
+        a = f_a + self.dw_a(f_a)
+        b = f_b + self.dw_b(f_b)
+        ab = torch.cat([a, b], dim=1)
+        desc = ab.mean((2, 3), keepdim=True) + ab.amax((2, 3), keepdim=True)
+        gate = 2.0 * torch.sigmoid(self.channel_gate(desc))
+        return self.conv(ab * gate)
