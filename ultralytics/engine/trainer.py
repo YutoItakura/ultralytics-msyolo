@@ -1132,12 +1132,19 @@ class BaseTrainer:
                 else:  # weight (with decay)
                     g[0][fullname] = param
 
-        from ultralytics.nn.modules.multispectral import CGFusion, CMGFusion, MSAttnFusion
+        from ultralytics.nn.modules.multispectral import (
+            CGFusion,
+            CMGFusion,
+            MSAttnFusion,
+            MSAttnS12Fusion,
+            MSAttnS13Fusion,
+            MSAttnS1Fusion,
+        )
 
         ms_boosted = {
             id(p)
             for m in unwrap_model(model).modules()
-            if isinstance(m, (CGFusion, CMGFusion, MSAttnFusion))
+            if isinstance(m, (CGFusion, CMGFusion, MSAttnFusion, MSAttnS1Fusion, MSAttnS12Fusion, MSAttnS13Fusion))
             for p in m.parameters()
         }
         if not use_muon:

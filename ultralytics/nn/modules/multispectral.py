@@ -23,7 +23,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ("CGFusion", "CMGFusion", "MSAttnFusion", "MSFusion", "MSSplit")
+__all__ = (
+    "CGFusion",
+    "CMGFusion",
+    "MSAttnFusion",
+    "MSAttnS12Fusion",
+    "MSAttnS13Fusion",
+    "MSAttnS1Fusion",
+    "MSFusion",
+    "MSSplit",
+)
 
 
 class MSSplit(nn.Module):
@@ -436,4 +445,218 @@ class MSAttnFusion(nn.Module):
 
         # 4) Combine and project with 1x1 conv
         ab_total = ab_base + self.scale_attn * ab_attn + self.scale_contrast * ab_contrast
+        return self.conv(ab_total)
+
+
+class MSAttnS1Fusion(nn.Module):
+    """Ablation Variant 1 (Stage 1 Only): Multi-Scale Local Misalignment Absorption + Residual + 1x1 Conv.
+
+    Includes ONLY Stage 1 (parallel 3x3 + 5x5 depthwise conv per stream + GroupNorm + SiLU with residual scale 0.05)
+    followed by the 1x1 cross-stream fusion convolution.
+    """
+
+    def __init__(self, c1: int, c2: int, num_heads: int = 4):
+        """Initialize MSAttnS1Fusion (Stage 1 only)."""
+        super().__init__()
+        if c1 != 2 * c2:
+            raise ValueError(f"MSAttnS1Fusion expects two equal-width streams (c1 == 2 * c2), got c1={c1}, c2={c2}")
+        while c2 % num_heads != 0 and num_heads > 1:
+            num_heads //= 2
+        self.c2 = c2
+        self.num_heads = num_heads
+
+        # Stage 1: Multi-scale local misalignment absorption (3x3 + 5x5 depthwise conv per stream)
+        self.dw3_a = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2, bias=False)
+        self.dw5_a = nn.Conv2d(c2, c2, 5, 1, 2, groups=c2, bias=False)
+        self.dw3_b = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2, bias=False)
+        self.dw5_b = nn.Conv2d(c2, c2, 5, 1, 2, groups=c2, bias=False)
+        self.norm_a = nn.GroupNorm(num_heads, c2)
+        self.norm_b = nn.GroupNorm(num_heads, c2)
+        self.scale_align = nn.Parameter(torch.full((1, c1, 1, 1), 0.05))
+
+        # Final 1x1 cross-channel fusion convolution
+        self.conv = nn.Conv2d(c1, c2, 1, 1, 0, bias=True)
+        self.reset_identity()
+
+    @torch.no_grad()
+    def reset_identity(self):
+        """Initialize the final 1x1 conv to [0.5*I | 0.5*I] and residual scale to 0.05."""
+        self.scale_align.fill_(0.05)
+        c2, c1 = self.conv.out_channels, self.conv.in_channels
+        k = c1 // c2
+        w = torch.zeros(c2, c1, 1, 1)
+        eye = torch.eye(c2) / k
+        for s in range(k):
+            w[:, s * c2 : (s + 1) * c2, 0, 0] = eye
+        self.conv.weight.copy_(w)
+        if self.conv.bias is not None:
+            self.conv.bias.zero_()
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+        """Fuse visible and NIR/RE streams via Stage 1 multi-scale alignment and 1x1 convolution."""
+        f_a, f_b = x[0], x[1]
+        align_a = F.silu(self.norm_a(self.dw3_a(f_a) + self.dw5_a(f_a)))
+        align_b = F.silu(self.norm_b(self.dw3_b(f_b) + self.dw5_b(f_b)))
+        ab_align = torch.cat([align_a, align_b], dim=1)
+        ab_base = torch.cat([f_a, f_b], dim=1) + self.scale_align * ab_align
+        return self.conv(ab_base)
+
+
+class MSAttnS12Fusion(nn.Module):
+    """Ablation Variant 2 (Stage 1 + Stage 2): Multi-Scale Alignment + Bi-Directional Cross-Covariance Attention.
+
+    Includes Stage 1 (multi-scale alignment) and Stage 2 (bi-directional multi-head cross-covariance attention)
+    with additive residual scaling (0.05), without Stage 3 (7x7 local background contrast).
+    """
+
+    def __init__(self, c1: int, c2: int, num_heads: int = 4):
+        """Initialize MSAttnS12Fusion (Stage 1 + Stage 2)."""
+        super().__init__()
+        if c1 != 2 * c2:
+            raise ValueError(f"MSAttnS12Fusion expects two equal-width streams (c1 == 2 * c2), got c1={c1}, c2={c2}")
+        while c2 % num_heads != 0 and num_heads > 1:
+            num_heads //= 2
+        self.c2 = c2
+        self.num_heads = num_heads
+
+        # Stage 1: Multi-scale local misalignment absorption
+        self.dw3_a = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2, bias=False)
+        self.dw5_a = nn.Conv2d(c2, c2, 5, 1, 2, groups=c2, bias=False)
+        self.dw3_b = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2, bias=False)
+        self.dw5_b = nn.Conv2d(c2, c2, 5, 1, 2, groups=c2, bias=False)
+        self.norm_a = nn.GroupNorm(num_heads, c2)
+        self.norm_b = nn.GroupNorm(num_heads, c2)
+
+        # Stage 2: Bi-directional Cross-Covariance Attention
+        self.qkv_a = nn.Conv2d(c2, c2 * 3, 1, bias=False)
+        self.qkv_b = nn.Conv2d(c2, c2 * 3, 1, bias=False)
+        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1) * 4.0)
+        self.norm_attn = nn.GroupNorm(num_heads * 2, c1)
+
+        # Learnable residual scales initialized to 0.05
+        self.scale_align = nn.Parameter(torch.full((1, c1, 1, 1), 0.05))
+        self.scale_attn = nn.Parameter(torch.full((1, c1, 1, 1), 0.05))
+
+        # Final 1x1 cross-channel fusion convolution
+        self.conv = nn.Conv2d(c1, c2, 1, 1, 0, bias=True)
+        self.reset_identity()
+
+    @torch.no_grad()
+    def reset_identity(self):
+        """Initialize the final 1x1 conv to [0.5*I | 0.5*I] and residual scales to 0.05."""
+        self.scale_align.fill_(0.05)
+        self.scale_attn.fill_(0.05)
+        c2, c1 = self.conv.out_channels, self.conv.in_channels
+        k = c1 // c2
+        w = torch.zeros(c2, c1, 1, 1)
+        eye = torch.eye(c2) / k
+        for s in range(k):
+            w[:, s * c2 : (s + 1) * c2, 0, 0] = eye
+        self.conv.weight.copy_(w)
+        if self.conv.bias is not None:
+            self.conv.bias.zero_()
+
+    def _cross_cov_attn(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, b: int, c: int, h: int, w: int
+    ) -> torch.Tensor:
+        """Compute L2-normalized multi-head cross-covariance attention in O(HW) time."""
+        nh = self.num_heads
+        d = c // nh
+        q = q.reshape(b, nh, d, h * w)
+        k = k.reshape(b, nh, d, h * w)
+        v = v.reshape(b, nh, d, h * w)
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
+        attn = (q @ k.transpose(-2, -1)) * self.temperature
+        attn = attn.softmax(dim=-1)
+        out = attn @ v
+        return out.reshape(b, c, h, w)
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+        """Fuse visible and NIR/RE streams via Stage 1 alignment and Stage 2 cross-covariance attention."""
+        f_a, f_b = x[0], x[1]
+        bsz, c, h, w = f_a.shape
+
+        align_a = F.silu(self.norm_a(self.dw3_a(f_a) + self.dw5_a(f_a)))
+        align_b = F.silu(self.norm_b(self.dw3_b(f_b) + self.dw5_b(f_b)))
+        ab_align = torch.cat([align_a, align_b], dim=1)
+        ab_base = torch.cat([f_a, f_b], dim=1) + self.scale_align * ab_align
+        a_cur, b_cur = ab_base[:, :c], ab_base[:, c:]
+
+        qa, ka, va = self.qkv_a(a_cur).chunk(3, dim=1)
+        qb, kb, vb = self.qkv_b(b_cur).chunk(3, dim=1)
+        attn_a = self._cross_cov_attn(qa, kb, vb, bsz, c, h, w)
+        attn_b = self._cross_cov_attn(qb, ka, va, bsz, c, h, w)
+        ab_attn = self.norm_attn(torch.cat([attn_a, attn_b], dim=1))
+
+        ab_total = ab_base + self.scale_attn * ab_attn
+        return self.conv(ab_total)
+
+
+class MSAttnS13Fusion(nn.Module):
+    """Ablation Variant 3 (Stage 1 + Stage 3): Multi-Scale Alignment + 7x7 Local Leaf-Background Anomaly Contrast.
+
+    Includes Stage 1 (multi-scale alignment) and Stage 3 (7x7 local background subtraction + 3x3 depthwise conv)
+    with additive residual scaling (0.05), without Stage 2 (cross-covariance attention).
+    """
+
+    def __init__(self, c1: int, c2: int, num_heads: int = 4):
+        """Initialize MSAttnS13Fusion (Stage 1 + Stage 3)."""
+        super().__init__()
+        if c1 != 2 * c2:
+            raise ValueError(f"MSAttnS13Fusion expects two equal-width streams (c1 == 2 * c2), got c1={c1}, c2={c2}")
+        while c2 % num_heads != 0 and num_heads > 1:
+            num_heads //= 2
+        self.c2 = c2
+        self.num_heads = num_heads
+
+        # Stage 1: Multi-scale local misalignment absorption
+        self.dw3_a = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2, bias=False)
+        self.dw5_a = nn.Conv2d(c2, c2, 5, 1, 2, groups=c2, bias=False)
+        self.dw3_b = nn.Conv2d(c2, c2, 3, 1, 1, groups=c2, bias=False)
+        self.dw5_b = nn.Conv2d(c2, c2, 5, 1, 2, groups=c2, bias=False)
+        self.norm_a = nn.GroupNorm(num_heads, c2)
+        self.norm_b = nn.GroupNorm(num_heads, c2)
+
+        # Stage 3: Local lesion contrast enhancer (subtract 7x7 local background average + depthwise refinement)
+        self.local_pool = nn.AvgPool2d(kernel_size=7, stride=1, padding=3, count_include_pad=False)
+        self.contrast_dw = nn.Conv2d(c1, c1, 3, 1, 1, groups=c1, bias=False)
+        self.norm_contrast = nn.GroupNorm(num_heads * 2, c1)
+
+        # Learnable residual scales initialized to 0.05
+        self.scale_align = nn.Parameter(torch.full((1, c1, 1, 1), 0.05))
+        self.scale_contrast = nn.Parameter(torch.full((1, c1, 1, 1), 0.05))
+
+        # Final 1x1 cross-channel fusion convolution
+        self.conv = nn.Conv2d(c1, c2, 1, 1, 0, bias=True)
+        self.reset_identity()
+
+    @torch.no_grad()
+    def reset_identity(self):
+        """Initialize the final 1x1 conv to [0.5*I | 0.5*I] and residual scales to 0.05."""
+        self.scale_align.fill_(0.05)
+        self.scale_contrast.fill_(0.05)
+        c2, c1 = self.conv.out_channels, self.conv.in_channels
+        k = c1 // c2
+        w = torch.zeros(c2, c1, 1, 1)
+        eye = torch.eye(c2) / k
+        for s in range(k):
+            w[:, s * c2 : (s + 1) * c2, 0, 0] = eye
+        self.conv.weight.copy_(w)
+        if self.conv.bias is not None:
+            self.conv.bias.zero_()
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+        """Fuse visible and NIR/RE streams via Stage 1 alignment and Stage 3 local anomaly contrast."""
+        f_a, f_b = x[0], x[1]
+
+        align_a = F.silu(self.norm_a(self.dw3_a(f_a) + self.dw5_a(f_a)))
+        align_b = F.silu(self.norm_b(self.dw3_b(f_b) + self.dw5_b(f_b)))
+        ab_align = torch.cat([align_a, align_b], dim=1)
+        ab_base = torch.cat([f_a, f_b], dim=1) + self.scale_align * ab_align
+
+        high_pass = ab_base - self.local_pool(ab_base)
+        ab_contrast = F.silu(self.norm_contrast(self.contrast_dw(high_pass)))
+
+        ab_total = ab_base + self.scale_contrast * ab_contrast
         return self.conv(ab_total)

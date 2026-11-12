@@ -162,6 +162,9 @@ weights/
 !weights/*-mscmg.pt
 !weights/*-mscg.pt
 !weights/*-msattn.pt
+!weights/*-msattn1.pt
+!weights/*-msattn12.pt
+!weights/*-msattn13.pt
 *.ts
 *.pb
 *.onnx

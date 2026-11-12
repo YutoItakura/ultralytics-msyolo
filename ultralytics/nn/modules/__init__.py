@@ -95,7 +95,16 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
-from .multispectral import CGFusion, CMGFusion, MSAttnFusion, MSFusion, MSSplit
+from .multispectral import (
+    CGFusion,
+    CMGFusion,
+    MSAttnFusion,
+    MSAttnS12Fusion,
+    MSAttnS13Fusion,
+    MSAttnS1Fusion,
+    MSFusion,
+    MSSplit,
+)
 from .transformer import (
     AIFI,
     MLP,
@@ -170,6 +179,9 @@ __all__ = (
     "LightConv",
     "MLPBlock",
     "MSAttnFusion",
+    "MSAttnS12Fusion",
+    "MSAttnS13Fusion",
+    "MSAttnS1Fusion",
     "MSDeformAttn",
     "MSFusion",
     "MSSplit",

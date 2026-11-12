@@ -61,6 +61,9 @@ from ultralytics.nn.modules import (
     Index,
     LRPCHead,
     MSAttnFusion,
+    MSAttnS12Fusion,
+    MSAttnS13Fusion,
+    MSAttnS1Fusion,
     MSFusion,
     MSSplit,
     Pose,
@@ -2143,7 +2146,9 @@ def parse_model(d, ch, verbose=True):
             c1 = ch[f]
             args = [c1, *args]
             c2 = MSSplit(*args).c2
-        elif m in frozenset({MSFusion, CMGFusion, CGFusion, MSAttnFusion}):  # multispectral middle fusion
+        elif m in frozenset(
+            {MSFusion, CMGFusion, CGFusion, MSAttnFusion, MSAttnS1Fusion, MSAttnS12Fusion, MSAttnS13Fusion}
+        ):  # multispectral middle fusion
             c1 = sum(ch[x] for x in f)
             c2 = ch[f[0]]
             args = [c1, c2, *args]
