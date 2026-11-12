@@ -299,11 +299,7 @@ class BaseTrainer:
             rank=LOCAL_RANK,
             mode="val",
         )
-        nb = len(self.train_loader)
         self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
-        if nb < self.accumulate * 4:  # ensure >= 4 optimizer steps per epoch on small datasets (e.g. 52 images)
-            self.accumulate = max(nb // 4, 1)
-        self._target_accumulate = self.accumulate
         weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
         iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
         self.optimizer = self.build_optimizer(
@@ -479,8 +475,7 @@ class BaseTrainer:
                 ni = i + nb * epoch
                 if ni < nw:
                     xi = [0, nw]  # x interp
-                    target_acc = getattr(self, "_target_accumulate", self.args.nbs / self.batch_size)
-                    self.accumulate = max(1, int(np.interp(ni, xi, [1, target_acc]).round()))
+                    self.accumulate = max(1, int(np.interp(ni, xi, [1, self.args.nbs / self.batch_size]).round()))
                     for x in self.optimizer.param_groups:
                         # Bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
                         x["lr"] = float(
@@ -1131,24 +1126,8 @@ class BaseTrainer:
                     g[1][fullname] = param
                 else:  # weight (with decay)
                     g[0][fullname] = param
-
-        from ultralytics.nn.modules.multispectral import (
-            CGFusion,
-            CMGFusion,
-            MSAttnFusion,
-            MSAttnS12Fusion,
-            MSAttnS13Fusion,
-            MSAttnS1Fusion,
-        )
-
-        ms_boosted = {
-            id(p)
-            for m in unwrap_model(model).modules()
-            if isinstance(m, (CGFusion, CMGFusion, MSAttnFusion, MSAttnS1Fusion, MSAttnS12Fusion, MSAttnS13Fusion))
-            for p in m.parameters()
-        }
         if not use_muon:
-            g = [list(x.values()) for x in g[:3]]  # convert to list of params
+            g = [x.values() for x in g[:3]]  # convert to list of params
 
         if name in {"Adam", "Adamax", "AdamW", "NAdam", "RAdam"}:
             optim_args = {"lr": lr, "betas": (momentum, 0.999), "weight_decay": 0.0}
@@ -1182,17 +1161,6 @@ class BaseTrainer:
                 for k, v in p.items():
                     (p1 if id(v) in boosted or "proto.semseg" in k or "SemanticSegment" in k else p2).append(v)
                 g_.extend([{"params": p1, **x, "lr": lr * 3}, {"params": p2, **x}])
-            g = g_
-        elif ms_boosted:
-            g_ = []
-            for x in g:
-                p = x.pop("params")
-                p_ms = [v for v in p if id(v) in ms_boosted]
-                p_base = [v for v in p if id(v) not in ms_boosted]
-                if p_base:
-                    g_.append({"params": p_base, **x})
-                if p_ms:
-                    g_.append({"params": p_ms, **x, "lr": lr * 5.0})
             g = g_
         optimizer = (partial(MuSGD, muon=muon, sgd=sgd) if use_muon else getattr(optim, name))(params=g)
 
