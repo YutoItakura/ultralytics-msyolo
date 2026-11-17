@@ -32,7 +32,9 @@ from ultralytics.utils import LOGGER
 
 MSMID_REPO = "YutoItakura/ultralytics-msyolo"  # GitHub repo hosting pre-converted weights in weights/
 MSMID_BRANCH = "main"
-MSMID_NAME_RE = re.compile(r"yolov8([nslmx])-(msmid|mscmg|mscg|msattn|msattn1|msattn12|msattn13)\.pt")
+MSMID_NAME_RE = re.compile(
+    r"yolov8([nslmx])-(msmid|mscmg|mscg|msattn|msattn1|msattn1-p3|msattn1-p34|msattn12|msattn13)\.pt"
+)
 
 N_BACKBONE = 10  # YOLOv8 backbone layers 0-9
 OFFSET_A, OFFSET_B, OFFSET_HEAD = 2, 13, 16  # layer index offsets in yolov8-msmid.yaml
@@ -211,6 +213,28 @@ def convert_yolov8_to_msattn1(
 ) -> Path:
     """Convert an official YOLOv8 checkpoint into an Ablation Stage-1 checkpoint (``yolov8{scale}-msattn1.pt``)."""
     return convert_yolov8_to_msmid(src=src, dst=dst, ch=ch, cfg=cfg, variant="msattn1", verbose=verbose)
+
+
+def convert_yolov8_to_msattn1_p3(
+    src: str | Path = "yolov8m.pt",
+    dst: str | Path | None = None,
+    ch: int = 4,
+    cfg: str | None = None,
+    verbose: bool = True,
+) -> Path:
+    """Convert an official YOLOv8 checkpoint into a P3-only Stage-1 checkpoint (``yolov8{scale}-msattn1-p3.pt``)."""
+    return convert_yolov8_to_msmid(src=src, dst=dst, ch=ch, cfg=cfg, variant="msattn1-p3", verbose=verbose)
+
+
+def convert_yolov8_to_msattn1_p34(
+    src: str | Path = "yolov8m.pt",
+    dst: str | Path | None = None,
+    ch: int = 4,
+    cfg: str | None = None,
+    verbose: bool = True,
+) -> Path:
+    """Convert an official YOLOv8 checkpoint into a P3+P4 Stage-1 checkpoint (``yolov8{scale}-msattn1-p34.pt``)."""
+    return convert_yolov8_to_msmid(src=src, dst=dst, ch=ch, cfg=cfg, variant="msattn1-p34", verbose=verbose)
 
 
 def convert_yolov8_to_msattn12(

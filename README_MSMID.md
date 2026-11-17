@@ -40,9 +40,11 @@ from ultralytics import YOLO
 model = YOLO("yolov8m-msattn.pt")
 
 # MSAttnFusion アブレーション用モデル (残差加算ありで統一)
-# model = YOLO("yolov8m-msattn1.pt")   # Stage 1のみ (マルチスケール位置ずれ吸収 + 1x1Conv)
-# model = YOLO("yolov8m-msattn12.pt")  # Stage 1 + 2 (位置ずれ吸収 + 双方向Cross-Cov Attention + 1x1Conv)
-# model = YOLO("yolov8m-msattn13.pt")  # Stage 1 + 3 (位置ずれ吸収 + 7x7局所背景コントラスト + 1x1Conv)
+# model = YOLO("yolov8m-msattn1.pt")      # Stage 1のみ (P3+P4+P5: マルチスケール位置ずれ吸収 + 1x1Conv)
+# model = YOLO("yolov8m-msattn1-p3.pt")   # Stage 1 (P3のみ位置ずれ吸収、P4・P5はMSFusion)
+# model = YOLO("yolov8m-msattn1-p34.pt")  # Stage 1 (P3+P4が位置ずれ吸収、P5はMSFusion)
+# model = YOLO("yolov8m-msattn12.pt")     # Stage 1 + 2 (位置ずれ吸収 + 双方向Cross-Cov Attention + 1x1Conv)
+# model = YOLO("yolov8m-msattn13.pt")     # Stage 1 + 3 (位置ずれ吸収 + 7x7局所背景コントラスト + 1x1Conv)
 
 # 既存モデル
 # model = YOLO("yolov8m-mscg.pt")

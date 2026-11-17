@@ -539,7 +539,7 @@ def attempt_download_asset(
             safe_download(url=f"{download_url}/{release}/{name}", file=file, min_bytes=1e5, **kwargs)
 
         elif re.fullmatch(
-            r"yolov8[nslmx]-(msmid|mscmg|mscg|msattn|msattn1|msattn12|msattn13)\.pt", name
+            r"yolov8[nslmx]-(msmid|mscmg|mscg|msattn|msattn1|msattn1-p3|msattn1-p34|msattn12|msattn13)\.pt", name
         ):  # multispectral fusion weights
             from ultralytics.utils.multispectral import get_msmid_weights
 
